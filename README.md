@@ -7,6 +7,12 @@
 
 **Mission-Critical AI Agent Framework with Military-Grade Security**
 
+## Connect with Us  
+
+[![Twitter](https://img.shields.io/badge/Twitter-%231DA1F2.svg?&style=for-the-badge&logo=twitter&logoColor=white)](https://twitter.com/HedronAGI)   
+[![Website](https://img.shields.io/badge/Website-%23000000.svg?&style=for-the-badge&logo=google-chrome&logoColor=white)](https://hedronlabs.info/)  
+
+
 ## 🛡️ Core Capabilities
 
 ### Zero-Trust Agent Orchestration

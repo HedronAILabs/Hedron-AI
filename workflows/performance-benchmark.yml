@@ -1,0 +1,183 @@
+name: Hedron Performance Benchmark Suite
+
+on:
+  workflow_dispatch:
+    inputs:
+      agent-scale:
+        description: 'Agent cluster size (100-10000)'
+        required: true
+        default: '1000'
+      test-duration:
+        description: 'Test duration in minutes'  
+        default: '30'
+  schedule:
+    - cron: '0 18 * * 5' # Weekly Friday benchmark
+  push:
+    branches: [ "perf/*" ]
+
+env:
+  K6_VERSION: '0.47.0'
+  PROMETHEUS_VERSION: '2.47.1'
+  GRAFANA_VERSION: '10.1.5'
+  TESTNET_ENV: aws-eks-perf # Options: gcp-gke-perf, azure-aks-perf
+
+jobs:
+  infrastructure_provisioning:
+    name: Provision Test Cluster
+    runs-on: perf-runner-pool
+    timeout-minutes: 90
+    outputs:
+      cluster-endpoint: ${{ steps.get-endpoint.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Deploy Testnet Infrastructure
+        uses: hashicorp/terraform-github-actions@v2
+        with:
+          tf_actions_version: 1.5.7
+          tf_actions_subcommand: 'apply'
+          args: '-auto-approve -var="cluster_size=${{ github.event.inputs.agent-scale }}"'
+          working_dir: 'infra/performance/${{ env.TESTNET_ENV }}'
+
+      - name: Configure Performance Monitoring
+        run: |
+          helm repo add prometheus https://prometheus-community.github.io/helm-charts
+          helm upgrade --install prometheus prometheus/prometheus \
+            --version ${{ env.PROMETHEUS_VERSION }} \
+            -n monitoring \
+            -f config/prometheus/perf-values.yaml
+
+          helm upgrade --install grafana grafana/grafana \
+            --version ${{ env.GRAFANA_VERSION }} \
+            -n monitoring \
+            --set adminPassword=${{ secrets.GRAFANA_ADMIN_PWD }}
+
+      - name: Get Cluster Endpoint
+        id: get-endpoint
+        run: |
+          ENDPOINT=$(kubectl get svc hedron-gateway -n ${{ env.TESTNET_ENV }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          echo "url=$ENDPOINT" >> $GITHUB_OUTPUT
+
+  stress_test:
+    name: Stress Test Campaign
+    runs-on: perf-runner-pool
+    needs: infrastructure_provisioning
+    strategy:
+      matrix:
+        protocol: [grpc, quic, websockets]
+        load: [10k, 50k, 100k]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install k6 with XSLT
+        uses: grafana/k6-action@v0.3.0
+        with:
+          k6-version: ${{ env.K6_VERSION }}
+          install-xslt: true
+
+      - name: Execute Load Test
+        env:
+          HEDRON_ENDPOINT: ${{ needs.infrastructure_provisioning.outputs.cluster-endpoint }}
+        run: |
+          k6 run --out json=results-${{ matrix.protocol }}-${{ matrix.load }}.json \
+            -e PROTOCOL=${{ matrix.protocol }} \
+            -e TPS=${{ matrix.load }} \
+            -e DURATION=${{ github.event.inputs.test-duration }}m \
+            test/performance/stress.js
+
+      - name: Generate HTML Report
+        run: |
+          k6 convert --output report-${{ matrix.protocol }}-${{ matrix.load }}.html \
+            results-${{ matrix.protocol }}-${{ matrix.load }}.json
+
+      - name: Archive Results
+        uses: actions/upload-artifact@v3
+        with:
+          name: stress-${{ matrix.protocol }}-${{ matrix.load }}
+          path: |
+            results-${{ matrix.protocol }}-${{ matrix.load }}.json
+            report-${{ matrix.protocol }}-${{ matrix.load }}.html
+
+  endurance_test:
+    name: 24h Endurance Run
+    runs-on: perf-runner-pool
+    needs: infrastructure_provisioning
+    timeout-minutes: 1500 # 25h buffer
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start Long-Running Test
+        env:
+          HEDRON_ENDPOINT: ${{ needs.infrastructure_provisioning.outputs.cluster-endpoint }}
+        run: |
+          nohup k6 run --duration 24h --vus 10000 \
+            --out prometheus=namespace=hedron_perf \
+            test/performance/endurance.js > endurance.log &
+
+      - name: Monitor Resource Usage
+        uses: prometheus/prometheus@v0.13.0
+        with:
+          scrape_interval: 15s
+          scrape_configs: |
+            - job_name: 'hedrons'
+              static_configs:
+                - targets: ['${{ env.TESTNET_ENV }}-prometheus:9090']
+
+      - name: Capture Final Metrics
+        if: always()
+        run: |
+          curl -X POST -H "Content-Type: application/json" \
+            -d '{"queries":[{"refId":"A","expr":"sum(rate(hedron_transactions_total[24h]))"}]}' \
+            http://admin:${{ secrets.GRAFANA_ADMIN_PWD }}@grafana:3000/api/ds/query \
+            > endurance-metrics.json
+
+  regression_analysis:
+    name: Performance Regression Check
+    runs-on: perf-runner-pool
+    needs: [stress_test, endurance_test]
+    steps:
+      - uses: actions/download-artifact@v3
+        with:
+          path: artifacts
+
+      - name: Compare Against Baseline
+        uses: hedronai/benchmark-action@v2
+        with:
+          current: artifacts/**/*.json
+          baseline: gh://hedronai/benchmarks/main
+          thresholds: |
+            latency_99pc: <30ms
+            error_rate: <0.01%
+            throughput: >95% of baseline
+
+      - name: Generate Performance Digest
+        run: |
+          python3 scripts/performance/compile_digest.py \
+            --input-dir artifacts \
+            --output report.pdf \
+            --format pdf
+
+      - name: Upload to S3
+        uses: aws-actions/upload-to-s3@v1
+        with:
+          path: report.pdf
+          bucket: ${{ secrets.AWS_PERF_BUCKET }}
+          key: reports/${{ github.run_id }}.pdf
+
+  teardown:
+    name: Cluster Teardown
+    runs-on: perf-runner-pool
+    needs: [regression_analysis]
+    if: always()
+    steps:
+      - name: Destroy Infrastructure
+        uses: hashicorp/terraform-github-actions@v2
+        with:
+          tf_actions_version: 1.5.7
+          tf_actions_subcommand: 'destroy'
+          args: '-auto-approve -var="cluster_size=0"'
+          working_dir: 'infra/performance/${{ env.TESTNET_ENV }}'
+
+      - name: Cleanup Storage
+        run: |
+          aws s3 rm s3://${{ secrets.AWS_PERF_BUCKET }}/temp-${{ github.run_id }} --recursive

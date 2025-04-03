@@ -1,0 +1,276 @@
+name: Hedron CI Main Pipeline
+
+on:
+  push:
+    branches: [ "main", "release/*" ]
+    paths-ignore: 
+      - 'docs/**'
+      - '*.md'
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  PYTHON_VERSION: '3.10'
+  RUST_VERSION: '1.68.0'
+  DOCKER_BUILDKIT: 1
+  GRPC_PYTHON_BUILD_SYSTEM_OPENSSL: 1
+  GRPC_PYTHON_BUILD_SYSTEM_ZLIB: 1
+
+jobs:
+  code_quality:
+    name: Static Analysis & Linting
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          submodules: recursive
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+          cache-dependency-path: |
+            **/requirements.txt
+            **/pyproject.toml
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: ${{ env.RUST_VERSION }}
+          override: true
+          components: clippy, rustfmt
+
+      - name: Python Code Validation
+        run: |
+          pip install -r requirements-dev.txt
+          make lint-py
+
+      - name: Rust Code Validation
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --all-targets -- -D warnings
+
+      - name: Security Scanning
+        uses: semgrep/semgrep-action@v1
+        with:
+          config: p/security-audit
+          output: semgrep-results.sarif
+          severity: WARNING
+
+      - name: Upload SARIF Report
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: semgrep-results.sarif
+
+  unit_tests:
+    name: Unit Test Suite
+    runs-on: ubuntu-22.04
+    needs: code_quality
+    strategy:
+      matrix:
+        python: ['3.9', '3.10', '3.11']
+        os: [ubuntu-22.04, windows-2022]
+        exclude:
+          - os: windows-2022
+            python: '3.11'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Cache Test Dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache/pip
+            venv
+          key: ${{ runner.os }}-tests-${{ matrix.python }}-${{ hashFiles('requirements-dev.txt') }}
+
+      - name: Run Core Unit Tests
+        run: |
+          python -m pytest test/unit/ \
+            --cov=src \
+            --cov-report=xml:coverage.xml \
+            --durations=25 \
+            -m "not integration"
+
+      - name: Upload Coverage
+        uses: codecov/codecov-action@v3
+        with:
+          file: coverage.xml
+          flags: unit
+          fail_ci_if_error: false
+
+  integration_tests:
+    name: Integration Test Suite
+    runs-on: ubuntu-22.04
+    needs: code_quality
+    services:
+      postgres:
+        image: postgres:14-alpine
+        env:
+          POSTGRES_DB: hedron_test
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5432:5432
+        options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y \
+            libssl-dev \
+            zlib1g-dev \
+            libpq-dev
+
+      - name: Run Integration Tests
+        env:
+          DB_URL: postgresql://test:test@localhost:5432/hedron_test
+        run: |
+          pip install -r requirements-test.txt
+          pytest test/integration/ \
+            -v \
+            --cov=src \
+            --cov-append \
+            --cov-report=xml:integration-coverage.xml \
+            -m "integration"
+
+      - name: Upload Integration Coverage
+        uses: codecov/codecov-action@v3
+        with:
+          file: integration-coverage.xml
+          flags: integration
+
+  security_audit:
+    name: Security Audit
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependency Vulnerability Scan
+        uses: actions/dependency-review-action@v3
+
+      - name: SBOM Generation
+        uses: cyclonedx/cdxgen-action@v3
+        with:
+          output-format: json
+
+      - name: Upload SBOM
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: bom.json
+
+  build_artifacts:
+    name: Build & Package
+    runs-on: ubuntu-22.04
+    needs: [unit_tests, integration_tests]
+    outputs:
+      docker_image: ${{ steps.docker_build.outputs.image_tag }}
+      pypi_version: ${{ steps.version_gen.outputs.package_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate Version
+        id: version_gen
+        run: |
+          VERSION=$(date +%Y.%m.%d)-$(git rev-parse --short HEAD)
+          echo "package_version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Build Python Wheels
+        run: |
+          pip install build
+          python -m build --wheel --outdir dist/
+
+      - name: Build Rust Components
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --release --features=zkp/accelerated
+
+      - name: Docker Build
+        id: docker_build
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: docker/agent.Dockerfile
+          tags: hedronai/core:${{ steps.version_gen.outputs.package_version }}
+          outputs: type=docker,dest=/tmp/image.tar
+
+      - name: Archive Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: release-artifacts
+          path: |
+            dist/*.whl
+            target/release/hedron-zkp
+            /tmp/image.tar
+
+  quality_gate:
+    name: Quality Gate
+    runs-on: ubuntu-22.04
+    needs: [code_quality, unit_tests, integration_tests, security_audit]
+    steps:
+      - name: SonarCloud Analysis
+        uses: sonarsource/sonarcloud-github-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      - name: Check Code Coverage
+        run: |
+          curl --fail -X GET \
+            -H "Authorization: token ${{ secrets.CODECOV_TOKEN }}" \
+            "https://codecov.io/api/gh/${{ github.repository }}/branch/main" \
+            | jq -e '.commit.totals.coverage >= 85'
+
+      - name: Check Technical Debt Ratio
+        uses: SonarSource/sonarcloud-quality-gate-action@v2
+        with:
+          sonarToken: ${{ secrets.SONAR_TOKEN }}
+
+  publish:
+    name: Publish Release
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    needs: [build_artifacts, quality_gate]
+    steps:
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          user: __token__
+          password: ${{ secrets.PYPI_TOKEN }}
+          packages_dir: dist/
+
+      - name: Publish Docker Image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: docker/agent.Dockerfile
+          push: true
+          tags: |
+            hedronai/core:latest
+            hedronai/core:${{ needs.build_artifacts.outputs.pypi_version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          generate_release_notes: true
+          artifacts: release-artifacts

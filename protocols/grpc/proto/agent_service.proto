@@ -1,0 +1,187 @@
+syntax = "proto3";
+
+package hedron.ai.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+import "google/rpc/status.proto";
+
+option go_package = "github.com/hedronai/hedron-core/api";
+option java_multiple_files = true;
+option java_package = "com.hedron.ai.protobuf";
+
+// ==================== Core Agent Service ====================
+service AgentOrchestrator {
+  // Agent lifecycle management
+  rpc CreateAgent(AgentSpec) returns (AgentInstance) {}
+  rpc TerminateAgent(TerminationRequest) returns (google.protobuf.Empty) {}
+  rpc ListAgents(AgentQuery) returns (AgentInventory) {}
+  
+  // Secure communication channel
+  rpc AgentStream(stream AgentMessage) returns (stream AgentMessage) {}
+  
+  // Consensus operations  
+  rpc ProposeBlock(BlockProposal) returns (ConsensusReceipt) {}
+  rpc ViewChange(ViewChangeRequest) returns (ViewChangeResponse) {}
+  
+  // Distributed coordination
+  rpc AcquireLease(LeaseRequest) returns (Lease) {}
+  rpc Heartbeat(Lease) returns (Lease) {}
+}
+
+// ==================== Monitoring Service ====================
+service AgentMonitor {
+  rpc GetTelemetry(TelemetryRequest) returns (stream SystemMetrics) {}
+  rpc AuditTrail(AuditFilter) returns (stream AuditRecord) {}
+  rpc AlertFeed(google.protobuf.Empty) returns (stream SecurityAlert) {}
+}
+
+// ==================== Data Plane Service ====================
+service DataRouter {
+  rpc RouteMessage(MessageEnvelope) returns (DeliveryReceipt) {}
+  rpc BulkTransfer(stream DataChunk) returns (TransferSummary) {}
+  rpc ReplicateState(StateSnapshot) returns (ReplicationAck) {}
+}
+
+// ==================== Message Types ====================
+message AgentSpec {
+  string id = 1;
+  string runtime = 2;  // WASM/Docker/LLVM
+  bytes config = 3;
+  map<string, string> capabilities = 4;
+  ComplianceProfile compliance = 5;
+}
+
+message AgentInstance {
+  string id = 1;
+  google.protobuf.Timestamp created_at = 2;
+  EndpointDescriptor endpoint = 3;
+  ResourceProfile resources = 4;
+  SecurityContext security = 5;
+}
+
+message AgentMessage {
+  oneof content {
+    TransactionPayload transaction = 1;
+    ConsensusMessage consensus = 2; 
+    MonitoringEvent monitoring = 3;
+    CommandInstruction command = 4;
+  }
+  
+  MessageHeader header = 15;
+}
+
+// ==================== Security Types ====================
+message SecurityContext {
+  string identity_token = 1;    // JWT/OAuth2
+  bytes session_key = 2;        // ECDH ephemeral key
+  repeated string entitlements = 3;
+  X509Certificate client_cert = 4;
+}
+
+message MessageHeader {
+  string message_id = 1;
+  google.protobuf.Timestamp timestamp = 2;
+  string trace_id = 3;          // OpenTelemetry context
+  string source_agent = 4;
+  repeated string destination_agents = 5;
+  bytes digital_signature = 6;
+  string version = 7;          // Semantic versioning
+}
+
+// ==================== Consensus Types ====================
+message BlockProposal {
+  uint64 sequence = 1;
+  bytes payload_hash = 2;
+  bytes previous_hash = 3;
+  bytes merkle_root = 4;
+  repeated bytes signatures = 5; // Threshold signatures
+}
+
+enum ConsensusState {
+  PRE_PREPARE = 0;
+  PREPARE = 1;
+  COMMIT = 2;
+  VIEW_CHANGE = 3;
+}
+
+message ConsensusReceipt {
+  uint64 view_number = 1;
+  uint64 sequence_number = 2;
+  bytes state_hash = 3;
+  google.rpc.Status validation_status = 4;
+}
+
+// ==================== Monitoring Types ====================
+message SystemMetrics {
+  message CpuUsage {
+    double user = 1;
+    double system = 2;
+    double io_wait = 3;
+  }
+  
+  message MemoryStats {
+    uint64 resident = 1;
+    uint64 virtual = 2;
+    uint64 shared = 3;
+  }
+
+  CpuUsage cpu = 1;
+  MemoryStats memory = 2;
+  NetworkUsage network = 3;
+  repeated ProcessThread threads = 4;
+}
+
+message AuditRecord {
+  google.protobuf.Timestamp timestamp = 1;
+  string principal = 2;
+  string operation = 3;
+  bytes before_state = 4;
+  bytes after_state = 5;
+  bytes proof = 6; // Cryptographic audit proof
+}
+
+// ==================== Enterprise Features ====================
+message ComplianceProfile {
+  GDPRCompliance gdpr = 1;
+  HIPAACompliance hipaa = 2;
+  PCIDSSCompliance pci = 3;
+  SOC2Compliance soc2 = 4;
+}
+
+message GDPRCompliance {
+  bool data_minimization = 1;
+  string dpia_reference = 2;
+  string lawful_basis = 3; 
+}
+
+message ResourceProfile {
+  ComputeQuota compute = 1;
+  StorageQuota storage = 2;
+  NetworkQuota network = 3;
+}
+
+// ==================== Error Handling ====================
+enum ErrorCode {
+  // Consensus errors (1000-1999)
+  CONSENSUS_TIMEOUT = 1000;
+  VIEW_CHANGE_REQUIRED = 1001;
+  
+  // Security errors (2000-2999)
+  INVALID_SIGNATURE = 2000;
+  ENTITLEMENT_MISSING = 2001;
+  
+  // Resource errors (3000-3999)
+  QUOTA_EXCEEDED = 3000;
+  CONNECTION_LIMIT = 3001;
+  
+  // Compliance errors (4000-4999)
+  GDPR_VIOLATION = 4000;
+  AUDIT_FAILURE = 4001;
+}
+
+message ErrorDetail {
+  ErrorCode code = 1;
+  string message = 2;
+  map<string, string> metadata = 3;
+}

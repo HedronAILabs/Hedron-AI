@@ -1,0 +1,136 @@
+name: Hedron Security Audit
+
+on:
+  push:
+    branches: [ "main", "release/*" ]
+    paths:
+      - 'src/**'
+      - 'config/**'
+      - 'helm/**'
+  pull_request:
+    branches: [ "main" ]
+  schedule:
+    - cron: '0 0 * * 1' # Weekly security sweep
+
+env:
+  SEMGREP_VERSION: '1.25.0'
+  TRIVY_VERSION: '0.45.0'
+  SBOM_FORMAT: 'cyclonedx'
+  OPA_VERSION: '0.58.0'
+
+jobs:
+  code_analysis:
+    name: Static Code Analysis
+    runs-on: security-audit-runner
+    timeout-minutes: 45
+    strategy:
+      matrix:
+        language: [python, rust, terraform]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Semgrep Analysis
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: >-
+            p/security-audit
+            p/ci
+            p/gcp
+            p/aws
+            p/azure
+          severity: WARNING
+          output: semgrep-${{ matrix.language }}.sarif
+          lang: ${{ matrix.language }}
+          args: --metrics=off
+
+      - name: CodeQL Analysis
+        uses: github/codeql-action/analyze@v2
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-and-quality
+          category: /language:${{ matrix.language }}
+
+  dependency_scanning:
+    name: Dependency Vulnerability Scan
+    runs-on: security-audit-runner
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: OWASP Dependency Check
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: 'HedronAI'
+          format: 'SARIF'
+          failOnCVSS: 7.0
+          additionalArguments: >
+            --scan **/target/
+            --enableExperimental
+            --cveValidForHours 24
+
+      - name: Container Scanning
+        uses>env:
+          SEARCH_PATHS: 'src/,config/'
+          ADDITIONAL_ARGS: '--no-git'
+
+  compliance_check:
+    name: Regulatory Compliance
+    runs-on: security-audit-runner
+    needs: [code_analysis, dependency_scanning]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: GDPR Compliance Check
+        uses>env:
+          FRAMEWORK: gdpr
+          FAIL_ON: high
+
+      - name: HIPAA Compliance Check
+        uses>env:
+          FRAMEWORK: hipaa
+          IGNORE_PATHS: 'test/'
+
+      - name: PCI-DSS Validation
+        uses>env:
+          STANDARD: pci-dss-3.2.1
+
+  sbom_generation:
+    name: SBOM Generation
+    runs-on: security-audit-runner
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate CycloneDX SBOM
+        uses: cyclonedx/cdxgen-action@v3
+        with:
+          output-format: ${{ env.SBOM_FORMAT }}
+          spec-version: 1.5
+          properties: 'type=library,type=framework'
+
+      - name: Attest SBOM
+        run: |
+          cosign attest --predicate bom.${{ env.SBOM_FORMAT }} \
+            --key .github/cosign.key \
+            --type ${{ env.SBOM_FORMAT }} \
+            --yes
+
+  final_report:
+    name: Security Posture Report
+    runs-on: security-audit-runner
+    needs: [compliance_check, sbom_generation]
+    steps:
+      - name: Generate Executive Summary
+        uses>env:
+          TEMPLATE: 'security-dashboard.md'
+          OUTPUT: security-report-${{ github.run_id }}.pdf
+
+      - name: Upload to SIEM
+        uses>env:
+          SIEM_ENDPOINT: ${{ secrets.SIEM_URL }}
+          AUTH_TOKEN: ${{ secrets.SIEM_TOKEN }}
+
+      - name: Notify Security Team
+        uses>env:
+          CHANNEL: '#security-alerts'
+          SEVERITY: 'high'

@@ -1,0 +1,173 @@
+syntax = "proto3";
+
+package hedron.consensus.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+import "hedron/core/security.proto";
+
+option go_package = "github.com/hedronai/hedron-core/api/consensus/v1";
+option java_multiple_files = true;
+option java_package = "com.hedron.consensus.protobuf";
+
+// ==================== Consensus Service ====================
+service ConsensusManager {
+  // PBFT protocol operations
+  rpc PrePrepare(ConsensusMessage) returns (ConsensusAck) {}
+  rpc Prepare(ConsensusMessage) returns (ConsensusAck) {}
+  rpc Commit(ConsensusMessage) returns (ConsensusAck) {}
+  
+  // View change protocol
+  rpc StartViewChange(ViewChangeTrigger) returns (stream ViewChangeSequence) {}
+  rpc FinalizeViewChange(ViewChangeProof) returns (NewViewConfirmation) {}
+  
+  // Recovery operations
+  rpc RequestCheckpoint(CheckpointQuery) returns (StateSnapshot) {}
+  rpc SynchronizeState(StateSyncRequest) returns (stream StateDelta) {}
+}
+
+// ==================== Consensus Messages ====================
+message ConsensusMessage {
+  oneof payload {
+    PrePrepareMessage pre_prepare = 1;
+    PrepareMessage prepare = 2;
+    CommitMessage commit = 3;
+    ViewChangeMessage view_change = 4;
+  }
+  
+  SecurityProof proof = 15;
+  MessageMetadata metadata = 16;
+}
+
+message PrePrepareMessage {
+  uint64 view_number = 1;
+  uint64 sequence_number = 2;
+  bytes request_digest = 3;
+  bytes batch_root = 4; // Merkle root of batched requests
+  google.protobuf.Timestamp timeout = 5;
+}
+
+message PrepareMessage {
+  uint64 view_number = 1;
+  uint64 sequence_number = 2;
+  bytes request_digest = 3;
+  bytes replicas_state = 4; // Hash of replica states
+}
+
+message CommitMessage {
+  uint64 view_number = 1;
+  uint64 sequence_number = 2;
+  bytes final_state_hash = 3;
+  repeated bytes validator_signatures = 4;
+}
+
+// ==================== View Change Protocol ====================
+message ViewChangeTrigger {
+  uint64 suspected_view = 1;
+  repeated FailureEvidence evidence = 2;
+  bytes last_stable_checkpoint = 3;
+}
+
+message ViewChangeSequence {
+  uint64 new_view_number = 1;
+  repeated ViewChangeProof candidate_proofs = 2;
+  bytes quorum_certificate = 3;
+  google.protobuf.Duration view_merge_timeout = 4;
+}
+
+message ViewChangeProof {
+  uint64 view_number = 1;
+  bytes checkpoint_proof = 2;
+  repeated bytes prepared_messages = 3; 
+  bytes transition_signature = 4;
+}
+
+// ==================== State Management ====================
+message StateSnapshot {
+  uint64 sequence_number = 1;
+  bytes state_root = 2;
+  bytes merkle_proof = 3;
+  repeated bytes delta_signatures = 4;
+  google.protobuf.Timestamp snapshot_time = 5;
+}
+
+message StateDelta {
+  uint64 from_sequence = 1;
+  uint64 to_sequence = 2;
+  bytes delta_root = 3;
+  repeated bytes transactions = 4;
+  bytes aggregation_signature = 5;
+}
+
+// ==================== Security Infrastructure ====================
+message SecurityProof {
+  bytes request_signature = 1;
+  bytes client_attestation = 2; // TEE attestation proof
+  bytes network_proof = 3;       // Proof of network path
+  bytes timestamp_proof = 4;    // RFC 3161 timestamp
+}
+
+message MessageMetadata {
+  string client_id = 1;
+  string session_id = 2;
+  google.protobuf.Timestamp expiration = 3;
+  repeated string policy_ids = 4;
+  ComplianceContext compliance = 5;
+}
+
+// ==================== Enterprise Features ====================
+message ComplianceContext {
+  enum DeploymentMode {
+    TESTING = 0;
+    STAGING = 1;
+    PRODUCTION = 2;
+    DISASTER_RECOVERY = 3;
+  }
+  
+  DeploymentMode mode = 1;
+  map<string, string> regional_constraints = 2; // e.g., "GDPR": "EU_DATA_ONLY"
+  repeated string certification_ids = 3;       // e.g., "SOC2-2023"
+}
+
+message FailureEvidence {
+  oneof evidence_type {
+    TimeoutFailure timeout = 1;
+    SignatureFailure signature = 2;
+    StateDivergence divergence = 3;
+    ResourceExhaustion resource = 4;
+  }
+  
+  google.protobuf.Timestamp detected_at = 15;
+}
+
+// ==================== Error Handling ====================
+enum ConsensusErrorCode {
+  CONSENSUS_OK = 0;
+  
+  // Protocol errors
+  VIEW_NUMBER_MISMATCH = 1001;
+  SEQUENCE_GAP_DETECTED = 1002;
+  QUORUM_NOT_ACHIEVED = 1003;
+  
+  // Security violations
+  INVALID_QUORUM_SIGNATURE = 2001;
+  ATTESTATION_VERIFICATION_FAILED = 2002;
+  TIMESTAMP_OUT_OF_BOUNDS = 2003;
+  
+  // Resource constraints
+  STATE_SYNC_TIMEOUT = 3001;
+  CHECKPOINT_TOO_LARGE = 3002;
+  VIEW_MERGE_CONFLICT = 3003;
+  
+  // Enterprise constraints
+  COMPLIANCE_VIOLATION = 4001;
+  DATA_SOVEREIGNTY_BREACH = 4002;
+  CERTIFICATION_EXPIRED = 4003;
+}
+
+message ConsensusStatus {
+  ConsensusErrorCode code = 1;
+  string message = 2;
+  bytes conflict_proof = 3;  // Cryptographic proof of error
+  repeated string repair_hints = 4;
+}

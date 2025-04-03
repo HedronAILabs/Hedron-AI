@@ -1,0 +1,252 @@
+name: Hedron Production Deployment
+
+on:
+  workflow_run:
+    workflows: ["CI Main Pipeline"]
+    types:
+      - completed
+  release:
+    types: [published]
+
+env:
+  HELM_VERSION: '3.12.0'
+  KUBECTL_VERSION: '1.27.4'
+  VAULT_VERSION: '1.14.0'
+  ENVIRONMENT: prod
+  K8S_NAMESPACE: hedron-prod
+
+jobs:
+  pre_deployment_checks:
+    name: Pre-Deployment Validation
+    runs-on: prod-runner-pool
+    timeout-minutes: 45
+    steps:
+      - name: Verify CI Completion
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const { data: run } = await github.rest.actions.getWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.payload.workflow_run.id,
+            });
+            if (run.conclusion !== 'success') {
+              core.setFailed('Upstream CI pipeline failed');
+            }
+
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: release-artifacts
+          path: artifacts
+
+      - name: Verify Image Signatures
+        run: |
+          cosign verify --key .github/cosign.pub \
+            artifacts/image.tar
+
+      - name: Dependency Vulnerability Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'artifacts/image.tar'
+          format: 'sarif'
+          output: trivy-results.sarif
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload Vulnerability Report
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: trivy-results.sarif
+
+  infrastructure_provisioning:
+    name: Cloud Infrastructure Sync
+    runs-on: prod-runner-pool
+    needs: pre_deployment_checks
+    strategy:
+      matrix:
+        cloud: [aws-eks, azure-aks, gcp-gke]
+    steps:
+      - name: Checkout Terraform Configs
+        uses: actions/checkout@v4
+        with:
+          path: infra
+          ref: prod-infra
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.5.7
+
+      - name: Terraform Apply
+        env:
+          TF_VAR_environment: ${{ env.ENVIRONMENT }}
+          TF_VAR_cluster_name: hedron-${{ matrix.cloud }}
+        run: |
+          cd infra/${{ matrix.cloud }}
+          terraform init -backend-config="access_token=${{ secrets.TF_CLOUD_TOKEN }}"
+          terraform apply -auto-approve
+
+  canary_deployment:
+    name: Canary Rollout
+    runs-on: prod-runner-pool
+    needs: infrastructure_provisioning
+    environment: 
+      name: production
+      url: https://api.hedron.ai/health
+    steps:
+      - name: Configure K8s Context
+        uses: azure/k8s-set-context@v3
+        with:
+          method: service-account
+          service-account: ${{ secrets.K8S_SERVICE_ACCOUNT }}
+
+      - name: Deploy Canary (5%)
+        uses: helm/helm-action@v2
+        with:
+          version: ${{ env.HELM_VERSION }}
+          command: upgrade --install \
+            --namespace ${{ env.K8S_NAMESPACE }} \
+            --version 0.1.0-canary-${{ github.run_id }} \
+            --set canary.enabled=true \
+            --set canary.weight=5 \
+            --wait \
+            --timeout 15m \
+            hedron-canary \
+            helm/
+
+      - name: Run Canary Tests
+        uses: stefanprodan/kube-tools@v1
+        with:
+          command: |
+            kubectl test hedron-canary \
+              --image=ghcr.io/hedronai/e2e-tester:latest \
+              --env="TEST_SCOPE=smoke" \
+              --env="TEST_INTENSITY=high" \
+              --namespace=${{ env.K8S_NAMESPACE }}
+
+      - name: Analyze Metrics
+        uses: hedronai/promql-action@v2
+        with:
+          query: |
+            sum(rate(http_requests_total{app="hedron", status!~"5.."}[5m])) 
+            / 
+            sum(rate(http_requests_total{app="hedron"}[5m]))
+          threshold: 0.995
+          datasource-url: ${{ secrets.PROMETHEUS_URL }}
+
+  full_deployment:
+    name: Production Rollout
+    runs-on: prod-runner-pool
+    needs: canary_deployment
+    concurrency: production
+    steps:
+      - name: Initialize Vault Secrets
+        uses: hashicorp/vault-action@v2
+        with:
+          url: ${{ secrets.VAULT_ADDR }}
+          method: approle
+          roleId: ${{ secrets.VAULT_ROLE_ID }}
+          secretId: ${{ secrets.VAULT_SECRET_ID }}
+          secrets: |
+            secret/hedron/prod/database | DB_CREDS
+            secret/hedron/prod/tls | TLS_CERT
+
+      - name: Deploy Helm Chart
+        uses: helm/helm-action@v2
+        with:
+          version: ${{ env.HELM_VERSION }}
+          command: upgrade --install \
+            --namespace ${{ env.K8S_NAMESPACE }} \
+            --version ${{ needs.pre_deployment_checks.outputs.package_version }} \
+            --wait \
+            --timeout 30m \
+            --atomic \
+            --create-namespace \
+            hedron-core \
+            helm/
+
+      - name: Verify Service Mesh Routing
+        run: |
+          ISTIOCTL="istioctl-${{ env.ISTIO_VERSION }}"
+          $ISTIOCTL analyze --namespace ${{ env.K8S_NAMESPACE }}
+
+      - name: Warmup Cache
+        uses: satackey/action-http-request@v1
+        with:
+          url: https://api.hedron.ai/warmup
+          method: POST
+          payload: '{"endpoints": ["/v1/agents", "/v1/zkp"]}'
+          headers: '{"Authorization": "${{ secrets.ADMIN_API_KEY }}"}'
+
+      - name: Final Health Check
+        uses: treosh/uptime-action@v2
+        with:
+          domain: api.hedron.ai
+          protocol: https
+          path: /health
+          timeout: 20
+          threshold: 3
+
+  post_deployment:
+    name: Post-Deployment Tasks
+    runs-on: prod-runner-pool
+    needs: full_deployment
+    if: always()
+    steps:
+      - name: Archive Deployment Logs
+        uses: actions/upload-artifact@v3
+        with:
+          name: deployment-logs-${{ github.run_id }}
+          path: |
+            /var/log/deployments/*
+          retention-days: 90
+
+      - name: Update Service Catalog
+        uses: servicenow/sn-gh-integration@v2
+        with:
+          instance: ${{ secrets.SNOW_INSTANCE }}
+          username: ${{ secrets.SNOW_USER }}
+          password: ${{ secrets.SNOW_PWD }}
+          service_id: hedron-core
+          state: deployed
+
+      - name: Notify Slack
+        uses: slackapi/slack-github-action@v1
+        with:
+          channel-id: ${{ secrets.SLACK_PROD_CHANNEL }}
+          payload: |
+            {
+              "text": "Deployment ${{ job.status }}",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Hedron AI Production Deployment*"
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Status*: ${{ job.status }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Version*: ${{ needs.pre_deployment_checks.outputs.package_version }}"
+                    }
+                  ]
+                }
+              ]
+            }
+
+      - name: Rollback on Failure
+        if: failure()
+        uses: helm/helm-action@v2
+        with:
+          version: ${{ env.HELM_VERSION }}
+          command: rollback \
+            --namespace ${{ env.K8S_NAMESPACE }} \
+            hedron-core \
+            $(helm history hedron-core -n ${{ env.K8S_NAMESPACE }} -o json | jq -r '.[-2].revision')

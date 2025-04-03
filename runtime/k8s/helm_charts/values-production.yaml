@@ -1,0 +1,243 @@
+# Hedron AI Production Helm Chart Values
+# Certified for: ISO 27001, SOC 2 Type II, HIPAA, PCI-DSS 4.0
+
+global:
+  environment: prod
+  cluster: 
+    name: hedron-ai-prod-cluster
+    provider: aws # aws|gcp|azure|onprem
+    regions: 
+      primary: us-west-2
+      replica: eu-central-1
+  security:
+    pspEnabled: true
+    podSecurityContext:
+      runAsUser: 10001
+      runAsGroup: 10001
+      fsGroup: 10001
+      seccompProfile:
+        type: RuntimeDefault
+    containerSecurityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop: ["ALL"]
+
+hedronCore:
+  replicaCount: 12
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 10%
+    type: RollingUpdate
+  autoscaling:
+    enabled: true
+    minReplicas: 12
+    maxReplicas: 100
+    metrics:
+      - type: Resource
+        resource:
+          name: cpu
+          target:
+            type: Utilization
+            averageUtilization: 75
+      - type: External
+        external:
+          metric:
+            name: hedron_throughput
+            selector:
+              matchLabels:
+                service: ai-orchestration
+          target:
+            type: AverageValue
+            averageValue: 50000
+
+  resources:
+    limits:
+      cpu: "4"
+      memory: "16Gi"
+      nvidia.com/gpu: 2
+    requests:
+      cpu: "2"
+      memory: "8Gi"
+      ephemeral-storage: "50Gi"
+
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: node.hedron.ai/class
+                operator: In
+                values: ["ai-accelerated"]
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchExpressions:
+                - key: app.kubernetes.io/instance
+                  operator: In
+                  values: ["hedron-core"]
+            topologyKey: topology.kubernetes.io/zone
+
+  topologySpreadConstraints:
+    - maxSkew: 2
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/instance: hedron-core
+
+network:
+  serviceType: LoadBalancer
+  internalLoadBalancer: true
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-internal: "true"
+    service.beta.kubernetes.io/aws-load-balancer-security-groups: "sg-076421exxxxx"
+  ports:
+    grpc: 
+      port: 50051
+      protocol: TCP
+      maxConcurrentConnections: 10000
+    metrics:
+      port: 9090
+      protocol: TCP
+  egressPolicy: 
+    allowedDestinations:
+      - cidr: 10.0.0.0/8
+        ports: [443, 50051]
+      - cidr: 172.16.0.0/12
+        ports: [9090-9100]
+
+storage:
+  aiModels:
+    enabled: true
+    className: hedron-ai-efs-sc
+    size: 10Ti
+    mountPath: /hedron/models
+    backup:
+      enabled: true
+      schedule: "0 2 * * *"
+      retention: 30d
+  vectorDB:
+    size: 5Ti
+    className: gp3-encrypted
+    iops: 16000
+    throughput: 1000
+
+database:
+  enabled: true
+  type: aurora-postgresql
+  version: "13.7"
+  replicas: 5
+  resources:
+    limits:
+      cpu: "8"
+      memory: "64Gi"
+    requests:
+      cpu: "4" 
+      memory: "32Gi"
+  parameters:
+    max_connections: 2000
+    shared_buffers: 16GB
+    maintenance_work_mem: 2GB
+  connectionPool:
+    enabled: true
+    maxConns: 1500
+    minConns: 100
+
+observability:
+  metrics:
+    prometheus:
+      enabled: true
+      retention: 30d
+      scrapeInterval: 15s
+    datadog:
+      enabled: true
+      apiKeySecret: datadog-credentials
+  logging:
+    fluentbit:
+      enabled: true
+      bufferSize: 100M
+      retention: 45d
+    splunk:
+      hecTokenSecret: splunk-prod-token
+      index: hedron_prod
+  tracing:
+    tempo:
+      enabled: true
+      samplingRate: 100%
+    xray:
+      enabled: true
+
+security:
+  serviceAccount:
+    create: true
+    annotations:
+      eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/hedron-ai-prod
+    automountToken: false
+  podSecurityPolicies:
+    allowedHostPaths: []
+    allowedCapabilities: []
+    readOnlyRootFilesystem: true
+  keyManagement:
+    vault:
+      enabled: true
+      addr: https://vault.enterprise.com
+      role: hedron-ai-prod
+    awsKms:
+      enabled: true
+      keyArn: arn:aws:kms:us-west-2:123456789012:key/abcd1234-5678-90ef-ghij12345678
+
+backup:
+  enabled: true
+  schedule: "0 3 * * *"
+  retention: 90d
+  target:
+    s3:
+      bucket: hedron-ai-prod-backups
+      region: us-west-2
+      kmsKeyId: arn:aws:kms:us-west-2:123456789012:key/backup-key
+    gcs:
+      bucket: hedron-prod-backup
+      location: US
+
+disasterRecovery:
+  multiCluster:
+    enabled: true
+    clusters:
+      - name: hedron-ai-dr-cluster
+        region: eu-west-1
+        provider: aws
+    syncInterval: 5m
+  statefulWorkloads:
+    replicationFactor: 3
+
+compliance:
+  gdpr:
+    enabled: true
+    dataRetention: 730d
+  hipaa:
+    auditLogging: true
+    encryptionAtRest: true
+  pci:
+    networkIsolation: true
+    cardDataSegregation: true
+
+updateStrategy:
+  canary:
+    enabled: true
+    steps:
+      - pause: 
+          duration: 15m
+      - analysis:
+          interval: 5m
+          metrics:
+            - name: error-rate
+              threshold: 0.5%
+            - name: p99-latency
+              threshold: 1500ms
+      - pause: 
+          duration: 1h
+  rollbackWindow: 24h

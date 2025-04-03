@@ -1,0 +1,127 @@
+[package]
+name = "hedron-core"
+version = "1.0.0-rc.8"
+edition = "2021"
+license = "Apache-2.0 AND BSL-1.0"
+repository = "https://github.com/HedronAI/Hedron-Core"
+documentation = "https://docs.hedron.ai"
+readme = "SECURITY.md"
+description = "Enterprise-grade multi-agent framework with military-grade security and PBFT consensus"
+keywords = ["blockchain", "distributed-systems", "cryptography", "enterprise"]
+categories = ["network-programming", "cryptography", "distributed-systems"]
+authors = ["Hedron AI Security Team <security@hedron.ai>"]
+exclude = [".github/*", "test-vectors/*", "fuzzing-corpus/*"]
+
+[features]
+default = ["hardened-runtime", "fips-mode"]
+hardened-runtime = ["ring/default", "jemallocator", "zeroize/alloc"]
+fips-mode = ["openssl/fips", "aws-lc-fips-sys"]
+enterprise-auth = ["oauth2", "saml2-rs", "openidconnect"]
+quantum-safe = ["pqcrypto/default", "dilithium5", "falcon1024"]
+hardware-accel = ["cuda", "opencl", "metal"]
+telemetry = ["opentelemetry", "prometheus", "metrics-exporter-prometheus"]
+zk-proofs = ["arkworks/all", "bellman/default", "halo2_proofs"]
+
+[dependencies]
+# Cryptography
+ring = { version = "0.17.5", features = ["alloc", "std"] }
+aws-lc-fips-sys = { version = "0.1.0", optional = true }
+openssl = { version = "0.10.63", features = ["vendored"], optional = true }
+pqcrypto = { version = "0.18.0", features = ["serde"], optional = true }
+dilithium5 = { version = "2.0.1", optional = true }
+falcon1024 = { version = "1.3.0", optional = true }
+
+# Distributed Systems
+tonic = { version = "0.10.2", features = ["tls", "tls-roots"] }
+raft-rs = { version = "0.7.0", features = ["serde"] }
+libp2p = { version = "0.53.1", features = ["tcp-tokio", "websocket", "noise", "tls", "mplex", "yamux"] }
+pbft-engine = { version = "0.9.3", features = ["serde", "metrics"] }
+
+# Zero-Knowledge
+arkworks = { version = "0.4.1", features = ["parallel", "bls12_381", "bw6_761"] }
+bellman = { version = "0.13.0", features = ["multicore"] }
+halo2_proofs = { version = "0.3.0", features = ["multicore"] }
+plonk = { version = "0.5.0", features = ["full"] }
+
+# Hardware Acceleration
+cuda = { version = "0.1.4", optional = true, features = ["driver"] }
+opencl = { version = "0.4.0", optional = true }
+metal = { version = "0.1.0", optional = true }
+
+# Security
+zeroize = { version = "1.6.0", features = ["zeroize_derive"] }
+secrets = { version = "0.4.0", features = ["serde"] }
+memsec = { version = "0.6.3" }
+sgx-isa = { version = "0.13.0", optional = true }
+
+# Performance
+jemallocator = { version = "0.5.4", optional = true }
+crossbeam = { version = "0.8.3" }
+rayon = { version = "1.8.0" }
+
+# Enterprise
+grpc-auth = { version = "0.9.0", features = ["oauth2", "jwt"] }
+saml2-rs = { version = "0.5.1", optional = true }
+openidconnect = { version = "2.0.0", optional = true }
+ldap3 = { version = "0.11.3", optional = true }
+
+# Monitoring
+opentelemetry = { version = "0.21.0", features = ["metrics", "rt-tokio"] }
+prometheus = { version = "0.13.3", features = ["process"] }
+metrics-exporter-prometheus = { version = "0.12.0", optional = true }
+
+[build-dependencies]
+tonic-build = "0.10.2"
+prost-build = "0.11.9"
+protoc-rust = "3.0.0"
+
+[dev-dependencies]
+criterion = { version = "0.5.1", features = ["html_reports"] }
+proptest = { version = "1.2.0", features = ["std"] }
+tokio = { version = "1.35.1", features = ["full"] }
+testcontainers = { version = "0.15.0", features = ["tls", "redis"] }
+fuzzcheck = { version = "0.13.0" }
+
+[profile.dev]
+opt-level = 1
+debug = true
+split-debuginfo = "unpacked"
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+lto = "fat"
+debug = false
+panic = "abort"
+incremental = false
+strip = "symbols"
+overflow-checks = true
+
+[profile.bench]
+opt-level = 3
+debug = false
+lto = "thin"
+codegen-units = 16
+incremental = true
+
+[workspace]
+members = ["protocol-buffers", "fuzz-targets"]
+exclude = ["experimental"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs", "-D", "warnings"]
+
+[package.metadata.security]
+audit = { enabled = true }
+advisories = { url = "https://security.hedron.ai" }
+vulnerability-reporting = "security@hedron.ai"
+
+[package.metadata.build]
+rustc-version = "1.72"
+msrv = "1.70"
+
+[package.metadata.optimization]
+simd = "avx512"
+target-cpu = "native"
+link-arg = "-Wl,-z,relro,-z,now"

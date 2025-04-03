@@ -1,0 +1,152 @@
+Hedron-Core/
+├── .github/
+│   ├── workflows/
+│   │   ├── ci-main.yml
+│   │   ├── cd-prod.yml
+│   │   ├── security-audit.yml
+│   │   └── performance-benchmark.yml
+│   ├── ISSUE_TEMPLATE/
+│   │   ├── BUG_REPORT.md
+│   │   ├── FEATURE_REQUEST.md
+│   │   └── SECURITY.md
+│   └── dependabot.yml
+│
+├── docs/
+│   ├── ARCHITECTURE/
+│   │   ├── CORE_DESIGN.md
+│   │   ├── SECURITY_MODEL.md
+│   │   └── DATA_FLOW.md
+│   ├── DEVELOPERS/
+│   │   ├── CONTRIBUTING.md
+│   │   └── ONBOARDING.md
+│   └── ADRS/
+│       ├── 0001-consensus-choice.md
+│       └── 0002-zkp-implementation.md
+│
+├── src/
+│   ├── core/
+│   │   ├── agent/
+│   │   │   ├── lifecycle/
+│   │   │   │   ├── agent_state_machine.py
+│   │   │   │   └── health_monitor.py
+│   │   │   ├── capabilities/
+│   │   │   │   ├── decision_engine/
+│   │   │   │   │   ├── business_rules.py
+│   │   │   │   │   └── risk_assessment.py
+│   │   │   │   └── knowledge_graph/
+│   │   │   │       ├── ontology_manager.py
+│   │   │   │       └── data_connector.py
+│   │   │   └── communication/
+│   │   │       ├── grpc_channel.py
+│   │   │       └── pubsub_backend.py
+│   │   │
+│   │   ├── orchestration/
+│   │   │   ├── consensus/
+│   │   │   │   ├── pbft/
+│   │   │   │   │   ├── pbft_node.py
+│   │   │   │   │   ├── pbft_messages.py
+│   │   │   │   │   └── view_change_handler.py
+│   │   │   │   └── raft/
+│   │   │   │       ├── raft_leader.py
+│   │   │   │       └── log_replication.py
+│   │   │   └── scheduler/
+│   │   │       ├── dag_scheduler.py
+│   │   │       └── resource_optimizer.py
+│   │   │
+│   │   └── security/
+│   │       ├── zkp/
+│   │       │   ├── stark/
+│   │       │   │   ├── src/
+│   │       │   │   │   ├── lib.rs
+│   │       │   │   │   └── circuits.rs
+│   │       │   │   └── Cargo.toml
+│   │       │   └── snark/
+│   │       │       ├── groth16.py
+│   │       │       └── setup_parameters.json
+│   │       └── federated/
+│   │           ├── encrypted_aggregation.py
+│   │           └── parameter_server.py
+│   │
+│   ├── protocols/
+│   │   ├── grpc/
+│   │   │   ├── proto/
+│   │   │   │   ├── agent_service.proto
+│   │   │   │   └── consensus.proto
+│   │   │   └── service_impl/
+│   │   │       ├── agent_server.py
+│   │   │       └── client_stub.py
+│   │   └── websockets/
+│   │       ├── message_serializer.py
+│   │       └── auth_middleware.py
+│   │
+│   ├── integrations/
+│   │   ├── sap/
+│   │   │   ├── idoc_handler.py
+│   │   │   └── bapi_mapper.py
+│   │   ├── salesforce/
+│   │   │   ├── bulk_api.py
+│   │   │   └── metadata_loader.py
+│   │   └── oracle/
+│   │       ├── ebs_connector.py
+│   │       └── jde_adapter.py
+│   │
+│   └── runtime/
+│       ├── k8s/
+│       │   ├── operators/
+│       │   │   ├── agent_operator.py
+│       │   │   └── consensus_operator.py
+│       │   └── helm_charts/
+│       │       ├── values-production.yaml
+│       │       └── templates/
+│       │           ├── agent-deployment.yaml
+│       │           └── service-monitor.yaml
+│       └── serverless/
+│           ├── aws/
+│           │   ├── lambda_agent.py
+│           │   └── layer_builder.sh
+│           └── azure/
+│               ├── function_app.py
+│               └── deploy.ps1
+│
+├── test/
+│   ├── unit/
+│   │   ├── test_agent_lifecycle.py
+│   │   └── test_zkp_circuits.py
+│   ├── integration/
+│   │   ├── test_multi_agent_scenarios.py
+│   │   └── test_sap_integration.py
+│   ├── performance/
+│   │   ├── load_test_10k_agents.py
+│   │   └── memory_usage_test.py
+│   └── benchmarks/
+│       ├── grpc_benchmark.py
+│       └── pbft_throughput_test.py
+│
+├── examples/
+│   ├── supply_chain/
+│   │   ├── inventory_optimizer.py
+│   │   └── shipping_coordinator.py
+│   └── financial/
+│       ├── fraud_detection_agent.py
+│       └── portfolio_agent.py
+│
+├── helm/
+│   ├── Chart.yaml
+│   ├── values-dev.yaml
+│   └── templates/
+│       ├── statefulset.yaml
+│       └── configmap.yaml
+│
+├── docker/
+│   ├── agent/
+│   │   ├── Dockerfile
+│   │   └── entrypoint.sh
+│   └── grpc-gateway/
+│       ├── Dockerfile
+│       └── nginx.conf
+│
+├── pyproject.toml
+├── Makefile
+├── requirements.txt
+├── runtime.txt
+└── CODEOWNERS
